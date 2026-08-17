@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "browser-automation-agent"
+version = "0.1.0"
+description = "LangGraph-driven browser automation agent with Playwright, MCP server, and FastAPI dashboard backend."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg",
+    "alembic",
+    "pydantic>=2",
+    "pydantic-settings",
+    "playwright",
+    "langgraph",
+    "langchain-core",
+    "langchain-openai",
+    "langchain-anthropic",
+    "mcp",
+    "redis",
+    "jinja2",
+    "python-dotenv",
+    "pytest",
+    "pytest-asyncio",
+    "httpx",
+]
+
+# Optional: browser-use pulls in a large transitive dependency tree (its own
+# LLM clients, telemetry, etc). Kept out of the base install so the core
+# agent stays lightweight; install with `pip install -e .[browseruse]`.
+[project.optional-dependencies]
+browseruse = ["browser-use"]
+
+[tool.setuptools.packages.find]
+include = ["apps*", "packages*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

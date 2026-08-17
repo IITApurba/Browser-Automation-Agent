@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Captcha Mock</title>
+</head>
+<body>
+<div id="g-recaptcha" class="g-recaptcha">
+  <p>Verify you are human</p>
+</div>
+
+<label for="human-check">
+  <input id="human-check" type="checkbox" />
+  I'm human
+</label>
+
+<script>
+document.getElementById('human-check').addEventListener('change', function (event) {
+  if (event.target.checked) {
+    document.getElementById('g-recaptcha').style.display = 'none';
+  }
+});
+</script>
+</body>
+</html>

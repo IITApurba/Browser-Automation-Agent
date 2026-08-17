@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+*.db
+
+# Node
+node_modules/
+apps/dashboard/dist/
+npm-debug.log*
+
+# Env
+.env
+
+# Misc
+.pytest_cache/
+.mypy_cache/
+*.log

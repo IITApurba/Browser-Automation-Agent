@@ -1,0 +1,24 @@
+# Run Report
+
+- **Task goal:** {{ task_goal }}
+- **Status:** {{ status }}
+- **Step count:** {{ steps|length }}
+- **Generated:** {{ generated_at }}
+
+## Extracted Data
+
+{% if extracted_data %}
+| # | Data |
+|---|------|
+{% for record in extracted_data %}| {{ loop.index }} | {{ record }} |
+{% endfor %}
+{% else %}
+_No data extracted._
+{% endif %}
+
+## Steps
+
+| Index | Type | Status |
+|-------|------|--------|
+{% for step in steps %}| {{ step.index }} | {{ step.type }} | {{ step.status }} |
+{% endfor %}
