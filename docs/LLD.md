@@ -31,28 +31,51 @@ class AgentState(TypedDict):
     error: str | None
     retry_count: int
     captcha_detected: bool
-    checkpoint_id: str | None
+    agent_checkpoint_id: str | None
     extracted_data: list[dict]
     run_id: str | None
+    critic_verdict: dict | None
 ```
 
-This is the exact object threaded through every LangGraph node and the object reconstructed from a `Checkpoint` on resume.
+This is the exact object threaded through every LangGraph node and the object reconstructed from a `Checkpoint` on resume. (`checkpoint_id` was renamed to `agent_checkpoint_id` — newer LangGraph releases reserve `checkpoint_id` as an internal channel name and refuse to compile a graph that shadows it.)
 
 ## 3. Graph topology (`packages/agent/graph.py`, `packages/agent/routing.py`)
 
-Nodes: `planner`, `worker`, `replanner`, `captcha_handler`, `reporter`.
+Nodes: `planner`, `worker`, `critic`, `replanner`, `captcha_handler`, `reporter` — see HLD §3a for the supervisor/worker/critic rationale.
 
-Routing (`route_after_worker(state) -> str`), evaluated after every `worker` step:
+Routing, evaluated after every `worker` step (`route_after_worker(state) -> str`):
 
 ```
 captcha_detected == True                      -> "captcha"        -> captcha_handler -> END (paused)
 error is set AND retry_count < MAX_RETRIES(3)  -> "error_retry"    -> replanner -> worker
+error is set AND retry_count >= MAX_RETRIES    -> "error_exhausted"-> reporter (partial) -> END
+otherwise                                      -> "critic"         -> critic
+```
+
+Then evaluated after `critic` (`route_after_critic(state) -> str`) — the critic can itself set `state["error"]` when `verdict.should_replan` is true, which routes back into the same retry logic:
+
+```
+captcha_detected == True                      -> "captcha"        -> captcha_handler -> END (paused)
+error is set (incl. critic-flagged) AND retry_count < MAX_RETRIES  -> "error_retry"    -> replanner -> worker
 error is set AND retry_count >= MAX_RETRIES    -> "error_exhausted"-> reporter (partial) -> END
 current_subtask_index + 1 < len(plan)          -> "more_subtasks"  -> advance_subtask -> worker
 otherwise                                      -> "done"           -> reporter -> END
 ```
 
 `advance_subtask` is a plain state transform (`current_subtask_index += 1`), not an LLM call — kept cheap and deterministic on the hot path.
+
+### 3a. Critic verdict schema and flow
+
+`packages/agent/nodes/critic.py` builds a prompt from the current subtask, `last_action_result`, and a fresh `toolkit.dom_snapshot()`, then calls `structured_output.parse_with_retry(llm, prompt, CriticVerdict)` (see §13). `CriticVerdict` (`packages/agent/schemas.py`):
+
+```python
+class CriticVerdict(BaseModel):
+    passed: bool
+    reason: str = ""
+    should_replan: bool = False
+```
+
+If the critic's own output fails validation twice, the node does **not** fail the run — it defaults to `passed: True` with a `"critic parse failed, defaulting to pass"` reason, so a malfunctioning guardrail degrades to the pre-critic behavior rather than blocking every run. If `passed` is false and `should_replan` is true, the node sets `state["error"]`, which the existing retry/replan machinery picks up unchanged — the critic plugs into routing without adding a new terminal state.
 
 ## 4. Execution/persistence service (`packages/agent/runner.py`)
 
@@ -135,5 +158,47 @@ Each tool is a direct `await` call into the shared `BrowserToolkit` instance, de
 
 - `tests/fixtures/site/*.html` — static, self-contained pages (`login.html`, `listing.html`, `form.html`, `captcha_mock.html`) served via `file://` or a local `http.server`, so unit/integration tests never touch the network.
 - `tests/unit/` — toolkit actions, selector fallback behavior, CAPTCHA detection on/off state.
-- `tests/integration/test_full_run_fixture_site.py` — full planner→worker→reporter run against the fixture site using the `"fake"` LLM provider.
+- `tests/integration/test_full_run_fixture_site.py` — full planner→worker→critic→reporter run against the fixture site using the `"fake"` LLM provider.
 - `tests/demo/run_demo_public_site.py` — documented, manually-run script for a real-site demo (not part of CI).
+
+## 13. Structured-output guardrails (`packages/agent/schemas.py`, `packages/agent/structured_output.py`)
+
+Every LLM-produced structural output — planner/replanner plans, the critic verdict — is a Pydantic model (`Plan`/`Subtask`, `CriticVerdict`). `structured_output.parse_with_retry(llm, prompt, schema)`:
+
+1. Calls the LLM, strips markdown code fences, `json.loads` + `schema.model_validate` the result.
+2. On `json.JSONDecodeError` or `pydantic.ValidationError`, retries **once** with the original prompt plus a `CORRECTION_SUFFIX` that includes the exact validation error, asking for JSON-only output.
+3. If the retry also fails, returns `None` rather than raising — callers must treat `None` as a soft failure (the critic degrades to a pass-through; the planner/replanner path already treats an unparseable plan as an empty plan plus a `state["error"]`, which routes to `replanner`/checkpointing instead of crashing the process).
+
+This keeps the "guardrail" behavior — bounded retries, no infinite loop, no unhandled exception from a malformed LLM response — in one place instead of duplicated per node.
+
+## 14. Guardrail policy layer (`packages/browser_tools/policy.py`)
+
+`ActionPolicy`, held on `BrowserToolkit` (`toolkit.policy`, defaulting to `allow_file_urls=True` so the offline fixture tests keep working):
+
+- `check_navigate(url)` — blocks `javascript:`/`data:` schemes outright, blocks `file:` unless explicitly allowed, and enforces an optional domain allowlist (`domain_allowlist: list[str] | None`) for `http`/`https` navigation.
+- `check_type_text(text)` — blocks input text containing an obvious inline-script pattern.
+- Both raise `PolicyViolationError`, called from `toolkit.navigate()`/`toolkit.type_text()` before the Playwright call executes.
+
+`worker_node` catches `PolicyViolationError` specifically (before the generic `except Exception`), sets `last_action_result.status = "policy_violation"`, and routes through the same error/checkpoint path as any other worker failure — a blocked action pauses/replans a run, it doesn't crash it.
+
+## 15. Tracing (`packages/agent/tracing.py`)
+
+`Span` is a dataclass carrying `trace_id`/`span_id`/`name`/`start_ns`/`end_ns`/`attributes` — the same shape OpenTelemetry spans expose, implemented without the `opentelemetry-sdk` dependency so tracing has zero install cost. `wrap_node(node_fn, name)` wraps a graph node coroutine: on each invocation it opens a span keyed by `state["run_id"]` as the trace id, runs the node, records `retry_count`/`error` as attributes, and emits one structured JSON log line per node execution via `logging.getLogger("agent.tracing")`. `build_graph(..., trace=True)` (the default) wraps `planner`/`worker`/`critic`/`replanner` this way; passing `trace=False` compiles the unwrapped graph.
+
+## 16. LLM cache (`packages/agent/llm_cache.py`)
+
+`LLMCache`:
+- **Exact-match layer (always on)**: SHA-256 of the whitespace-normalized, lowercased prompt as the key; an `OrderedDict`-backed LRU (`max_size`, default 256) with optional SQLite persistence (`persist_path`) for cross-process/run reuse.
+- **Semantic layer (opt-in, `semantic=True`)**: on an exact-match miss, computes a local bag-of-words "embedding" (`collections.Counter` of tokens, no network call) for the query and every cached prompt, and returns the cached response if the best cosine-similarity match is `>= semantic_threshold` (default `0.92`). Degrades to exact-match-only when no cached entries exist yet.
+- `CacheStats` tracks `hits`/`misses`/`semantic_hits`/`hit_rate`.
+
+`CachingChatModel` wraps any LangChain-style chat model (`.ainvoke`/`.invoke` returning a `.content`-bearing response) with an `LLMCache` instance, and additionally tracks `call_count`/`total_tokens` (word-count approximation, not tokenizer-accurate) /`total_cost_usd` (via `estimate_cost(model_name, token_count)`, a hardcoded per-model USD/1K-token table for reporting purposes only — not billing-accurate). `stats()` returns the combined dict consumed by the eval report (§17).
+
+## 17. Eval harness (`packages/evals/`)
+
+- `tasks.py` — a fixed `TASKS: list[EvalTask]` suite, each with a `task_goal`, `extraction_schema`, scripted `plan_responses` (fake-LLM JSON, referencing `tests/fixtures/site/*.html` via `file://` URIs), and an `expected(extracted_data) -> bool` correctness checker.
+- `run.py`:
+  - `run_task(task, shared_cache)` builds a fresh `BrowserToolkit`, two `CachingChatModel`s (planner/replanner and critic — the critic always sees a single hardcoded `CRITIC_PASS_RESPONSE` since the fixed task suite doesn't hand-author a verdict per subtask), compiles the graph via `build_graph(llm=planner_llm, critic_llm=critic_llm, toolkit=toolkit)`, and times the full `ainvoke`.
+  - `run_suite(repeat=N)` runs every task `N` times against one **shared** `LLMCache`, so identical repeated prompts produce genuine cache hits (this is what the reported hit rate actually measures — see README "Results").
+  - Aggregates pass rate, p50/p95/mean latency, average retry count, total tokens/cost, and cache stats into a summary dict; `main()` writes `packages/evals/reports/latest.json` and `latest.md` and prints the Markdown report.
+- Invoke via `make eval` or `python -m packages.evals.run`. Entirely offline (fake LLM + `file://` fixtures), so it runs in CI the same as the test suite.

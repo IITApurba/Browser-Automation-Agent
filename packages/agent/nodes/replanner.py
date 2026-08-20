@@ -1,6 +1,7 @@
 import json
 import re
 from pathlib import Path
+from string import Template
 
 from packages.agent.state import AgentState
 
@@ -34,7 +35,7 @@ async def replanner_node(state: AgentState, llm=None, toolkit=None, memory_store
     index = state["current_subtask_index"]
     remaining_plan = state["plan"][index:]
 
-    prompt = PROMPT_PATH.read_text(encoding="utf-8").format(
+    prompt = Template(PROMPT_PATH.read_text(encoding="utf-8")).safe_substitute(
         task_goal=state["task_goal"],
         extraction_schema=json.dumps(state.get("extraction_schema") or {}),
         error=state.get("error") or "",

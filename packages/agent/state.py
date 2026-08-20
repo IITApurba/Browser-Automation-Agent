@@ -11,6 +11,7 @@ class AgentState(TypedDict):
     error: str | None
     retry_count: int
     captcha_detected: bool
-    checkpoint_id: str | None
+    agent_checkpoint_id: str | None
     extracted_data: list[dict]
     run_id: str | None
+    critic_verdict: dict | None

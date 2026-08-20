@@ -29,7 +29,7 @@ def _new_state(task_goal: str, extraction_schema: dict | None, run_id: str) -> A
         "error": None,
         "retry_count": 0,
         "captcha_detected": False,
-        "checkpoint_id": None,
+        "agent_checkpoint_id": None,
         "extracted_data": [],
         "run_id": run_id,
     }
@@ -134,7 +134,7 @@ class GraphRunner:
                 "error": None,
                 "retry_count": 0,
                 "captcha_detected": False,
-                "checkpoint_id": None,
+                "agent_checkpoint_id": None,
                 "extracted_data": extracted_data,
                 "run_id": run_id,
             }

@@ -20,6 +20,29 @@ apps/dashboard (React)  <-->  apps/api (FastAPI)  <-->  packages/agent (LangGrap
 
 Full design docs: [`docs/HLD.md`](docs/HLD.md) (system-level design, component responsibilities, data flow) and [`docs/LLD.md`](docs/LLD.md) (module-level design: schemas, state machine, algorithms, API contracts).
 
+## 2026-era additions
+
+Beyond the core planner/worker loop, four production-agent patterns are implemented, not just described:
+
+- **Observability**: every graph node (`planner`, `worker`, `critic`, `replanner`) runs inside an OTel-shaped `Span` (`packages/agent/tracing.py`) — structured JSON per node execution with duration and retry/error attributes — so a run's behavior is inspectable without attaching a debugger.
+- **Supervisor/worker/critic multi-agent orchestration**: a dedicated `critic` node (`packages/agent/nodes/critic.py`) independently judges whether the worker's result actually satisfied the subtask's intent, catching silent failures (empty extraction, wrong page, misclicked element) that a bare exception check misses — see [`docs/HLD.md` §3a](docs/HLD.md).
+- **Structured-output guardrails**: every LLM-produced plan and verdict is Pydantic-validated (`packages/agent/schemas.py`), with one bounded correction-prompt retry on validation failure (`packages/agent/structured_output.py`), and a pre-action `ActionPolicy` denylist (`packages/browser_tools/policy.py`) blocks dangerous navigations/inputs before Playwright ever executes them.
+- **Semantic LLM caching**: exact-match prompt-hash caching (always on) plus an opt-in local cosine-similarity layer (`packages/agent/llm_cache.py`, no embedding API call) cut redundant LLM calls and are reported per eval run below.
+
+## Results
+
+Numbers below are from an actual run of the offline eval harness (`make eval` / `python -m packages.evals.run`) — 2 fixture tasks (listing extraction, login flow) × 3 repeats, real LangGraph execution against `tests/fixtures/site/*.html` via the `"fake"` LLM provider, no network access:
+
+| Metric | Value |
+|---|---|
+| Pass rate | 100% (6/6) |
+| Latency p50 / p95 | 61.6 ms / 114.0 ms |
+| Avg retries per task | 0 |
+| LLM cache hit rate | 66.7% (20/30 calls) |
+| Estimated LLM cost | $0.00 (fake provider) — see `estimate_cost()` for the real-provider cost model |
+
+Full report: `packages/evals/reports/latest.md` / `latest.json`, regenerated each run.
+
 ## Why it's built this way
 
 - **Resilience over cleverness.** Every selector lookup goes through a fallback chain (explicit selector → ARIA role → visible text → attribute heuristics → retry-with-backoff → LLM-assisted repair) before it's allowed to fail a step. Sites change their DOM; a agent that breaks on the first `TimeoutError` isn't autonomous, it's brittle.
@@ -33,12 +56,13 @@ Full design docs: [`docs/HLD.md`](docs/HLD.md) (system-level design, component r
 |---|---|
 | `apps/api` | FastAPI service — task/run/checkpoint/report endpoints, SSE log streaming |
 | `apps/dashboard` | React + Vite + TS dashboard — run list, live run detail, checkpoint resolution, report viewer |
-| `packages/agent` | LangGraph state machine: planner, worker, replanner, captcha_handler, reporter nodes; provider-agnostic LLM factory; `runner.py` execution/persistence service |
-| `packages/browser_tools` | Playwright `BrowserToolkit`, selector fallback strategy, auth/session reuse, CAPTCHA detection, `browser-use` fallback adapter |
+| `packages/agent` | LangGraph state machine: planner, worker, critic, replanner, captcha_handler, reporter nodes; provider-agnostic LLM factory; structured-output validation, tracing, LLM caching; `runner.py` execution/persistence service |
+| `packages/browser_tools` | Playwright `BrowserToolkit`, selector fallback strategy, auth/session reuse, CAPTCHA detection, action policy/guardrails, `browser-use` fallback adapter |
 | `packages/mcp_server` | MCP server (FastMCP) re-exporting `BrowserToolkit` as tools, stdio entrypoint |
 | `packages/db` | SQLAlchemy 2.0 async models (9 tables) + Alembic migrations |
 | `packages/memory` | In-run scratchpad + Postgres-backed cross-run memory |
 | `packages/extraction`, `packages/reporting` | Schema-driven extraction, Markdown report generation |
+| `packages/evals` | Offline eval harness (fixed task suite, fake LLM, real graph) — pass rate/latency/cache/cost report |
 | `tests/fixtures/site` | Offline static HTML fixtures (login, listing, CAPTCHA mock) — no external network dependency for tests |
 | `docs/` | HLD, LLD, demo script |
 
@@ -64,6 +88,7 @@ python -m packages.mcp_server.run_stdio
 
 - `make dev` — run the API locally with reload
 - `make test` — run the test suite (`pip install -e .[dev]`, `playwright install chromium` required for browser-backed tests)
+- `make eval` — run the offline eval harness (pass rate, latency, retries, LLM cache/cost) and write `packages/evals/reports/latest.{json,md}`
 - `make migrate` — apply Alembic migrations
 - `make up` — `docker compose up --build`
 

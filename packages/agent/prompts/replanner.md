@@ -4,22 +4,22 @@ The agent hit an error while executing its plan and needs a revised plan for
 the remaining subtasks.
 
 ## Task goal
-{task_goal}
+${task_goal}
 
 ## Extraction schema
-{extraction_schema}
+${extraction_schema}
 
 ## Error encountered
-{error}
+${error}
 
 ## Scratchpad (prior context/memory)
-{scratchpad}
+${scratchpad}
 
 ## Remaining plan (from current index onward)
-{remaining_plan}
+${remaining_plan}
 
 ## DOM snapshot at time of failure
-{dom_snapshot}
+${dom_snapshot}
 
 ## Output format
 

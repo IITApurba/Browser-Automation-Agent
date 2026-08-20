@@ -5,13 +5,13 @@ and an optional extraction schema, produce a step-by-step plan of subtasks
 the worker can execute against a live web page.
 
 ## Task goal
-{task_goal}
+${task_goal}
 
 ## Extraction schema
-{extraction_schema}
+${extraction_schema}
 
 ## Scratchpad (prior context/memory)
-{scratchpad}
+${scratchpad}
 
 ## Output format
 

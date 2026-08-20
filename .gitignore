@@ -20,3 +20,4 @@ npm-debug.log*
 .pytest_cache/
 .mypy_cache/
 *.log
+packages/evals/reports/

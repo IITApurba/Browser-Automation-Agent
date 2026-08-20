@@ -2,13 +2,16 @@ import re
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Playwright
 
+from packages.browser_tools.policy import ActionPolicy
+
 
 class BrowserToolkit:
-    def __init__(self) -> None:
+    def __init__(self, policy: ActionPolicy | None = None) -> None:
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self._context: BrowserContext | None = None
         self._page: Page | None = None
+        self.policy = policy or ActionPolicy(allow_file_urls=True)
 
     @property
     def page(self) -> Page:
@@ -35,12 +38,14 @@ class BrowserToolkit:
         self._playwright = None
 
     async def navigate(self, url: str) -> None:
+        self.policy.check_navigate(url)
         await self.page.goto(url)
 
     async def click(self, selector: str) -> None:
         await self.page.click(selector)
 
     async def type_text(self, selector: str, text: str) -> None:
+        self.policy.check_type_text(text)
         await self.page.fill(selector, text)
 
     async def extract(self, schema: dict) -> dict:

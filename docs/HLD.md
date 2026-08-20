@@ -23,15 +23,16 @@ It also doubles as an MCP tool provider, so the same browser capability is avail
         ┌───────────────────────┐            ┌───────────────────────┐
         │  Agent (LangGraph)     │            │  PostgreSQL            │
         │  planner/worker/       │◀──────────▶│  runs, steps,          │
-        │  replanner/captcha/    │  persists   │  checkpoints,          │
-        │  reporter              │            │  extracted_data,       │
+        │  critic/replanner/     │  persists   │  checkpoints,          │
+        │  captcha/reporter      │            │  extracted_data,       │
         └───────────┬────────────┘            │  reports, sessions,    │
                     │ tool calls               │  memory_entries        │
                     ▼                          └───────────────────────┘
         ┌───────────────────────┐
         │  Browser Toolkit       │
         │  (Playwright, single   │
-        │  source of truth)      │◀───────────┐
+        │  source of truth,      │
+        │  policy-gated)         │◀───────────┐
         └───────────┬────────────┘             │ same toolkit
                     ▼                          │
         ┌───────────────────────┐   ┌───────────────────────┐
@@ -39,6 +40,13 @@ It also doubles as an MCP tool provider, so the same browser capability is avail
         └───────────────────────┘   └───────────┬───────────┘
                                                   ▼
                                        Claude Code / Claude Desktop
+
+  Cross-cutting: packages/agent/tracing.py (span per node, OTel-shaped)
+                 packages/agent/llm_cache.py (prompt-hash + semantic cache)
+                 packages/agent/structured_output.py (Pydantic validate+retry)
+                 packages/browser_tools/policy.py (action/URL guardrails)
+                 packages/evals/ (offline eval harness -> pass rate, latency,
+                 cache hit rate, cost — see README "Results")
 ```
 
 ## 3. Components and responsibilities
@@ -47,12 +55,28 @@ It also doubles as an MCP tool provider, so the same browser capability is avail
 |---|---|---|
 | **Dashboard** | Visualize runs, stream live step logs, surface paused checkpoints for human action, render reports | Never talks to Playwright or the DB directly — API only |
 | **API (FastAPI)** | Task/run CRUD, launches agent execution as a background task, exposes SSE log stream, checkpoint resume endpoint | Never contains browser-automation or planning logic |
-| **Agent (LangGraph)** | Decomposes a goal into a plan, executes it step by step via the toolkit, detects failures/CAPTCHAs, adaptively replans, produces a report | Never talks to Postgres directly for browser state — goes through the toolkit/runner |
+| **Agent (LangGraph)** | Decomposes a goal into a plan, executes it step by step via the toolkit, has an independent critic judge each result, detects failures/CAPTCHAs, adaptively replans, produces a report | Never talks to Postgres directly for browser state — goes through the toolkit/runner |
+| **Critic (`agent/nodes/critic.py`)** | Supervisor-pattern reviewer: given the worker's result and a post-action DOM snapshot, independently judges (via a Pydantic-validated LLM verdict) whether the subtask's *intent* was met, not just whether the toolkit call didn't throw | Never executes browser actions itself — read-only judgment, feeds back into routing via `should_replan` |
 | **Runner (`agent/runner.py`)** | Drives the compiled graph, persists one `Step` per transition, creates `Checkpoint`s on pause, resumes from a checkpoint | Not a queue system — v1 runs in-process via FastAPI background tasks |
-| **Browser Toolkit** | The only implementation of navigate/click/type/extract/screenshot/dom_snapshot/captcha-check — used by both the agent worker and the MCP server | Never makes planning decisions — it's a dumb, reliable actuator |
+| **Browser Toolkit** | The only implementation of navigate/click/type/extract/screenshot/dom_snapshot/captcha-check — used by both the agent worker and the MCP server; every action passes an `ActionPolicy` guardrail check first | Never makes planning decisions — it's a dumb, reliable, policy-gated actuator |
+| **Tracing (`agent/tracing.py`)** | Wraps every graph node in an OTel-shaped `Span` (trace_id/span_id/duration/attributes), logged as structured JSON | Not a full OTel SDK — a stdlib-only, drop-in-compatible shape so a real exporter can be swapped in later without touching call sites |
+| **LLM cache (`agent/llm_cache.py`)** | Exact-match (hash) cache always on; optional cosine-similarity semantic layer behind a flag; tracks token/cost totals per run | Never calls an external embedding API — semantic matching is local bag-of-words, deliberately, so tests stay network-free |
+| **Policy (`browser_tools/policy.py`)** | Denylist/allowlist guardrail checked before every navigate/type action; raises `PolicyViolationError`, caught upstream and turned into a checkpointed error | Not a full sandbox — a pre-action gate, not runtime isolation |
+| **Evals (`packages/evals`)** | Runs a fixed task suite through the real graph against offline fixtures with the fake LLM provider; reports pass rate, latency percentiles, retries, cache hit rate, cost | Not a substitute for integration tests against live sites — offline-only by design so it runs in CI |
 | **MCP Server** | Thin adapter exposing Toolkit methods as MCP tools over stdio | Zero automation logic of its own |
 | **Postgres** | System of record for runs, steps, checkpoints, extracted data, reports, sessions, memory | Not used as a queue (Redis fills that role) |
 | **Redis** | Pub/sub backbone for live log fan-out (SSE), future task-queue upgrade path | Not the system of record |
+
+## 3a. Multi-agent pattern: supervisor / worker / critic
+
+This is a **supervisor/worker/critic** multi-agent design, not a single monolithic agent loop:
+
+- **planner** (supervisor) — decomposes the goal into subtasks and owns overall strategy.
+- **worker** — the only agent that touches the browser; purely executes one subtask via the toolkit.
+- **critic** — a second, independent LLM call that reviews the worker's result against the subtask's *stated intent*, using a fresh DOM snapshot. This catches classes of silent failure a raw exception-based check can't: a `click` that "succeeded" but landed on the wrong element, an `extract` that returned an empty list on a page that clearly had data, a `navigate` that 200'd to the wrong URL after a redirect.
+- **replanner** — re-engaged when either the worker raises an error *or* the critic flags `should_replan`, so recovery isn't limited to hard failures.
+
+Routing (`agent/routing.py`): `route_after_worker` sends hard errors straight to `error_retry`/`error_exhausted`, otherwise always to `critic`; `route_after_critic` then decides `more_subtasks` / `done` / `error_retry` based on the critic's verdict.
 
 ## 4. Key design decisions
 

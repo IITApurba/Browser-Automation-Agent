@@ -1,5 +1,6 @@
 from packages.agent.state import AgentState
 from packages.browser_tools.captcha_detect import detect_captcha
+from packages.browser_tools.policy import PolicyViolationError
 
 
 async def _execute_subtask(toolkit, subtask: dict):
@@ -43,6 +44,9 @@ async def worker_node(state: AgentState, toolkit=None) -> AgentState:
         state["last_action_result"] = result
         if subtask["type"] == "extract" and "data" in result:
             state["extracted_data"] = [*state.get("extracted_data", []), result["data"]]
+    except PolicyViolationError as exc:
+        state["error"] = f"worker: subtask {index} ({subtask.get('type')}) blocked by policy: {exc}"
+        state["last_action_result"] = {"status": "policy_violation", "message": str(exc)}
     except Exception as exc:
         state["error"] = f"worker: subtask {index} ({subtask.get('type')}) failed: {exc}"
         state["last_action_result"] = {"status": "error", "message": str(exc)}

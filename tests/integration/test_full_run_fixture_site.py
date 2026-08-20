@@ -41,7 +41,7 @@ async def test_full_run_against_fixture_site():
             "error": None,
             "retry_count": 0,
             "captcha_detected": False,
-            "checkpoint_id": None,
+            "agent_checkpoint_id": None,
             "extracted_data": [],
             "run_id": None,
         }

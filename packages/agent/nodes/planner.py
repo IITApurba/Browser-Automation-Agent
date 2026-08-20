@@ -1,6 +1,7 @@
 import json
 import re
 from pathlib import Path
+from string import Template
 
 from packages.agent.state import AgentState
 
@@ -31,7 +32,7 @@ async def planner_node(state: AgentState, llm=None, memory_store=None, session=N
         for entry in entries:
             scratchpad[entry.key] = entry.value
 
-    prompt = PROMPT_PATH.read_text(encoding="utf-8").format(
+    prompt = Template(PROMPT_PATH.read_text(encoding="utf-8")).safe_substitute(
         task_goal=state["task_goal"],
         extraction_schema=json.dumps(state.get("extraction_schema") or {}),
         scratchpad=json.dumps(scratchpad),

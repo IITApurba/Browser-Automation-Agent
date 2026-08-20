@@ -43,7 +43,7 @@ async def main() -> None:
             "error": None,
             "retry_count": 0,
             "captcha_detected": False,
-            "checkpoint_id": None,
+            "agent_checkpoint_id": None,
             "extracted_data": [],
             "run_id": None,
         }
